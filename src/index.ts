@@ -42,23 +42,15 @@ import { extractPostId } from "./utils.ts";
 const AppLayer = Layer.mergeAll(ConfigServiceLive, SlabClientServiceLive.pipe(Layer.provide(ConfigServiceLive)));
 
 /**
- * Define MCP tool handlers using Effect
+ * Read-only tool handlers
  */
-const toolHandlers = {
+const readToolHandlers = {
   "slab__get_post": (args: any) =>
     Effect.gen(function* () {
       const client = yield* SlabClientService;
       const postId = yield* extractPostId(args.postId as string);
       const post = yield* client.getPost(postId);
       return formatPostResponse(post);
-    }),
-
-  "slab__update_post": (args: any) =>
-    Effect.gen(function* () {
-      const client = yield* SlabClientService;
-      const postId = yield* extractPostId(args.postId as string);
-      const result = yield* client.updatePost(postId, args.content as string);
-      return `Post updated successfully: ${JSON.stringify(result, null, 2)}`;
     }),
 
   "slab__search": (args: any) =>
@@ -78,13 +70,99 @@ const toolHandlers = {
 };
 
 /**
- * Create and configure the MCP server
+ * Write tool handlers (only available when SLAB_READONLY is not "true")
  */
-function createServer() {
+const writeToolHandlers = {
+  "slab__update_post": (args: any) =>
+    Effect.gen(function* () {
+      const client = yield* SlabClientService;
+      const postId = yield* extractPostId(args.postId as string);
+      const result = yield* client.updatePost(postId, args.content as string);
+      return `Post updated successfully: ${JSON.stringify(result, null, 2)}`;
+    }),
+};
+
+/**
+ * Read-only tool definitions (always available)
+ */
+const readToolDefinitions = [
+  {
+    name: "slab__get_post",
+    description: "Fetch a Slab post by ID or URL. Returns the post content in markdown format.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        postId: {
+          type: "string",
+          description: "The Slab post ID or full post URL (e.g., 'abc123' or 'https://team.slab.com/posts/abc123')",
+        },
+      },
+      required: ["postId"],
+    },
+  },
+  {
+    name: "slab__search",
+    description: "Search for posts across your Slab workspace",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        query: {
+          type: "string",
+          description: "Search query string",
+        },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "slab__list_posts",
+    description: "List posts in your Slab workspace, optionally filtered by topic",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        topicId: {
+          type: "string",
+          description: "Optional topic ID to filter posts",
+        },
+      },
+    },
+  },
+];
+
+/**
+ * Write tool definitions (only exposed when readOnly is false)
+ */
+const writeToolDefinitions = [
+  {
+    name: "slab__update_post",
+    description: "Update a Slab post with new content. Edits will be attributed to your user account.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        postId: {
+          type: "string",
+          description: "The Slab post ID or full post URL",
+        },
+        content: {
+          type: "string",
+          description: "The new content for the post in markdown format",
+        },
+      },
+      required: ["postId", "content"],
+    },
+  },
+];
+
+/**
+ * Create and configure the MCP server
+ * @param readOnly - If true, write/update tools are disabled
+ */
+function createServer(readOnly: boolean) {
+  const serverName = readOnly ? "slabby-readonly" : "slabby";
   const server = new Server(
     {
-      name: "slabby",
-      version: "0.1.0",
+      name: serverName,
+      version: "0.2.0",
     },
     {
       capabilities: {
@@ -93,71 +171,19 @@ function createServer() {
     }
   );
 
+  // Build the active tool handlers and definitions based on readOnly flag
+  const activeHandlers: Record<string, (args: any) => Effect.Effect<string, any, any>> = {
+    ...readToolHandlers,
+    ...(!readOnly ? writeToolHandlers : {}),
+  };
+  const activeToolDefinitions = [
+    ...readToolDefinitions,
+    ...(!readOnly ? writeToolDefinitions : []),
+  ];
+
   // Register tool list handler
   server.setRequestHandler(ListToolsRequestSchema, async () => {
-    return {
-      tools: [
-        {
-          name: "slab__get_post",
-          description: "Fetch a Slab post by ID or URL. Returns the post content in markdown format.",
-          inputSchema: {
-            type: "object",
-            properties: {
-              postId: {
-                type: "string",
-                description: "The Slab post ID or full post URL (e.g., 'abc123' or 'https://team.slab.com/posts/abc123')",
-              },
-            },
-            required: ["postId"],
-          },
-        },
-        {
-          name: "slab__update_post",
-          description: "Update a Slab post with new content. Edits will be attributed to your user account.",
-          inputSchema: {
-            type: "object",
-            properties: {
-              postId: {
-                type: "string",
-                description: "The Slab post ID or full post URL",
-              },
-              content: {
-                type: "string",
-                description: "The new content for the post in markdown format",
-              },
-            },
-            required: ["postId", "content"],
-          },
-        },
-        {
-          name: "slab__search",
-          description: "Search for posts across your Slab workspace",
-          inputSchema: {
-            type: "object",
-            properties: {
-              query: {
-                type: "string",
-                description: "Search query string",
-              },
-            },
-            required: ["query"],
-          },
-        },
-        {
-          name: "slab__list_posts",
-          description: "List posts in your Slab workspace, optionally filtered by topic",
-          inputSchema: {
-            type: "object",
-            properties: {
-              topicId: {
-                type: "string",
-                description: "Optional topic ID to filter posts",
-              },
-            },
-          },
-        },
-      ],
-    };
+    return { tools: activeToolDefinitions };
   });
 
   // Register tool call handler
@@ -176,8 +202,21 @@ function createServer() {
       };
     }
 
+    // Block write operations if readOnly is enabled
+    if (readOnly && (name === "slab__update_post" || name === "slab__delete_post")) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Error: This server is running in READ-ONLY mode (SLAB_READONLY=true). Update and delete operations are disabled.",
+          },
+        ],
+        isError: true,
+      };
+    }
+
     // Get the handler for this tool
-    const handler = toolHandlers[name as keyof typeof toolHandlers];
+    const handler = activeHandlers[name];
     if (!handler) {
       return {
         content: [
@@ -231,11 +270,21 @@ async function main() {
     process.exit(1);
   }
 
+  const config = configResult.right;
+  const readOnly = config.readOnly;
+
   // Create and start the server
-  const server = createServer();
+  const server = createServer(readOnly);
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("Slabby MCP server running on stdio");
+
+  const mode = readOnly ? "READ-ONLY" : "READ-WRITE";
+  console.error(`Slabby MCP server running on stdio (${mode} mode)`);
+  if (readOnly) {
+    console.error("  ⛔ Write operations are DISABLED (SLAB_READONLY=true)");
+  } else {
+    console.error("  ✏️  Write operations are ENABLED (set SLAB_READONLY=true to disable)");
+  }
 }
 
 main().catch((error) => {

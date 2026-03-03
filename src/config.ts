@@ -35,6 +35,7 @@ export interface SlabConfig {
   readonly apiToken: string;
   readonly team: string;
   readonly graphqlUrl: string;
+  readonly readOnly: boolean;
 }
 
 /**
@@ -51,8 +52,11 @@ export const ConfigService = Context.GenericTag<ConfigService>("@services/Config
 
 /**
  * Load configuration from environment variables
+ * @param defaultReadOnly - Default value for readOnly if SLAB_READONLY env var is not set.
+ *                          Stdio server defaults to false (writes enabled),
+ *                          HTTP server defaults to true (writes disabled).
  */
-export const loadConfig = (): Effect.Effect<SlabConfig, ConfigError> =>
+export const loadConfig = (defaultReadOnly = false): Effect.Effect<SlabConfig, ConfigError> =>
   Effect.gen(function* () {
     const apiToken = process.env.SLAB_API_TOKEN;
     const team = process.env.SLAB_TEAM;
@@ -65,20 +69,36 @@ export const loadConfig = (): Effect.Effect<SlabConfig, ConfigError> =>
       return yield* Effect.fail(new ConfigError("SLAB_TEAM environment variable is required"));
     }
 
+    // SLAB_READONLY: set to "true" or "false" to explicitly control write access.
+    // If not set, falls back to the defaultReadOnly parameter.
+    const readOnlyEnv = process.env.SLAB_READONLY;
+    const readOnly = readOnlyEnv !== undefined
+      ? readOnlyEnv.toLowerCase() === "true"
+      : defaultReadOnly;
+
     return {
       apiToken,
       team,
       graphqlUrl: "https://api.slab.com/v1/graphql",
+      readOnly,
     };
   });
 
 /**
- * Live configuration layer - loads from environment
+ * Create a configuration layer with a specific defaultReadOnly value
+ * @param defaultReadOnly - Default for readOnly if SLAB_READONLY is not set
  */
-export const ConfigServiceLive = Layer.effect(
-  ConfigService,
-  Effect.gen(function* () {
-    const config = yield* loadConfig();
-    return { config };
-  })
-);
+export const makeConfigServiceLive = (defaultReadOnly = false) =>
+  Layer.effect(
+    ConfigService,
+    Effect.gen(function* () {
+      const config = yield* loadConfig(defaultReadOnly);
+      return { config };
+    })
+  );
+
+/**
+ * Live configuration layer - loads from environment
+ * Defaults to readOnly=false (writes enabled) — suitable for stdio/local use
+ */
+export const ConfigServiceLive = makeConfigServiceLive(false);

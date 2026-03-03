@@ -3,11 +3,10 @@
 /**
  * Slabby HTTP Server - MCP Server for Slab Knowledge Base Integration
  * 
- * This is a READ-ONLY version of the Slabby MCP server that supports HTTP transport
- * for deployment on Cloud Run or similar platforms.
+ * HTTP/SSE transport for deployment on Cloud Run or similar platforms.
  * 
  * Features:
- * - READ ONLY: No update/delete capabilities (safe for LLM access)
+ * - Configurable read-only mode via SLAB_READONLY env var (defaults to "true")
  * - HTTP/SSE transport for cloud deployment
  * - Health check endpoint for load balancers
  * 
@@ -26,26 +25,25 @@ import {
 import express from "express";
 import type { Request, Response } from "express";
 
-import { ConfigService, ConfigServiceLive } from "./config.ts";
+import { ConfigService, makeConfigServiceLive } from "./config.ts";
 import { SlabClientService, SlabClientServiceLive } from "./client.ts";
 import { formatPostResponse, formatSearchResults, formatListResults } from "./formatters.ts";
 import { extractPostId } from "./utils.ts";
 
 /**
  * The main application layer combining all services
+ * HTTP server defaults to read-only (SLAB_READONLY=true) for cloud deployment safety
  */
+const HttpConfigServiceLive = makeConfigServiceLive(true);
 const AppLayer = Layer.mergeAll(
-  ConfigServiceLive,
-  SlabClientServiceLive.pipe(Layer.provide(ConfigServiceLive))
+  HttpConfigServiceLive,
+  SlabClientServiceLive.pipe(Layer.provide(HttpConfigServiceLive))
 );
 
 /**
- * READ-ONLY tool handlers using Effect
- * 
- * NOTE: Update/delete operations have been intentionally removed
- * to prevent LLMs from modifying Slab content.
+ * Read-only tool handlers (always available)
  */
-const toolHandlers = {
+const readToolHandlers: Record<string, (args: Record<string, unknown>) => Effect.Effect<string, any, any>> = {
   // 📖 READ: Fetch post content by ID or URL
   "slab__get_post": (args: Record<string, unknown>) =>
     Effect.gen(function* () {
@@ -74,12 +72,100 @@ const toolHandlers = {
 };
 
 /**
- * Create and configure the READ-ONLY MCP server
+ * Write tool handlers (only available when SLAB_READONLY is not "true")
  */
-function createServer(): Server {
+const writeToolHandlers: Record<string, (args: Record<string, unknown>) => Effect.Effect<string, any, any>> = {
+  // ✏️ WRITE: Update post content
+  "slab__update_post": (args: Record<string, unknown>) =>
+    Effect.gen(function* () {
+      const client = yield* SlabClientService;
+      const postId = yield* extractPostId(args.postId as string);
+      const result = yield* client.updatePost(postId, args.content as string);
+      return `Post updated successfully: ${JSON.stringify(result, null, 2)}`;
+    }),
+};
+
+/**
+ * Read-only tool definitions
+ */
+const readToolDefinitions = [
+  {
+    name: "slab__get_post",
+    description: "Fetch a Slab post by ID or URL. Returns the post content in markdown format.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        postId: {
+          type: "string",
+          description:
+            "The Slab post ID or full post URL (e.g., 'abc123' or 'https://team.slab.com/posts/abc123')",
+        },
+      },
+      required: ["postId"],
+    },
+  },
+  {
+    name: "slab__search",
+    description: "Search for posts across your Slab workspace.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        query: {
+          type: "string",
+          description: "Search query string",
+        },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "slab__list_posts",
+    description: "List posts in your Slab workspace, optionally filtered by topic.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        topicId: {
+          type: "string",
+          description: "Optional topic ID to filter posts",
+        },
+      },
+    },
+  },
+];
+
+/**
+ * Write tool definitions (only exposed when readOnly is false)
+ */
+const writeToolDefinitions = [
+  {
+    name: "slab__update_post",
+    description: "Update a Slab post with new content. Edits will be attributed to your user account.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        postId: {
+          type: "string",
+          description: "The Slab post ID or full post URL",
+        },
+        content: {
+          type: "string",
+          description: "The new content for the post in markdown format",
+        },
+      },
+      required: ["postId", "content"],
+    },
+  },
+];
+
+/**
+ * Create and configure the MCP server
+ * @param readOnly - If true, write/update tools are disabled
+ */
+function createServer(readOnly: boolean): Server {
+  const serverName = readOnly ? "slabby-http-readonly" : "slabby-http";
   const server = new Server(
     {
-      name: "slabby-readonly",
+      name: serverName,
       version: "0.2.0",
     },
     {
@@ -89,62 +175,19 @@ function createServer(): Server {
     }
   );
 
-  // Register READ-ONLY tool list handler
+  // Build the active tool handlers and definitions based on readOnly flag
+  const activeHandlers: Record<string, (args: Record<string, unknown>) => Effect.Effect<string, any, any>> = {
+    ...readToolHandlers,
+    ...(!readOnly ? writeToolHandlers : {}),
+  };
+  const activeToolDefinitions = [
+    ...readToolDefinitions,
+    ...(!readOnly ? writeToolDefinitions : []),
+  ];
+
+  // Register tool list handler
   server.setRequestHandler(ListToolsRequestSchema, async () => {
-    return {
-      tools: [
-        // 📖 READ: Fetch post content by ID or URL
-        {
-          name: "slab__get_post",
-          description:
-            "Fetch a Slab post by ID or URL. Returns the post content in markdown format. This is a READ-ONLY operation.",
-          inputSchema: {
-            type: "object",
-            properties: {
-              postId: {
-                type: "string",
-                description:
-                  "The Slab post ID or full post URL (e.g., 'abc123' or 'https://team.slab.com/posts/abc123')",
-              },
-            },
-            required: ["postId"],
-          },
-        },
-        // 🔍 SEARCH: Find posts across your workspace
-        {
-          name: "slab__search",
-          description:
-            "Search for posts across your Slab workspace. This is a READ-ONLY operation.",
-          inputSchema: {
-            type: "object",
-            properties: {
-              query: {
-                type: "string",
-                description: "Search query string",
-              },
-            },
-            required: ["query"],
-          },
-        },
-        // 📋 LIST: Browse posts by topic
-        {
-          name: "slab__list_posts",
-          description:
-            "List posts in your Slab workspace, optionally filtered by topic. This is a READ-ONLY operation.",
-          inputSchema: {
-            type: "object",
-            properties: {
-              topicId: {
-                type: "string",
-                description: "Optional topic ID to filter posts",
-              },
-            },
-          },
-        },
-        // NOTE: slab__update_post has been REMOVED for security
-        // LLMs should not be able to modify Slab content
-      ],
-    };
+    return { tools: activeToolDefinitions };
   });
 
   // Register tool call handler
@@ -163,13 +206,13 @@ function createServer(): Server {
       };
     }
 
-    // Security: Block any update/delete operations
-    if (name === "slab__update_post" || name === "slab__delete_post") {
+    // Block write operations if readOnly is enabled
+    if (readOnly && (name === "slab__update_post" || name === "slab__delete_post")) {
       return {
         content: [
           {
             type: "text",
-            text: "Error: This server is READ-ONLY. Update and delete operations are disabled for security.",
+            text: "Error: This server is running in READ-ONLY mode (SLAB_READONLY=true). Update and delete operations are disabled.",
           },
         ],
         isError: true,
@@ -177,7 +220,7 @@ function createServer(): Server {
     }
 
     // Get the handler for this tool
-    const handler = toolHandlers[name as keyof typeof toolHandlers];
+    const handler = activeHandlers[name];
     if (!handler) {
       return {
         content: [
@@ -249,7 +292,7 @@ async function main(): Promise<void> {
   const configProgram = Effect.gen(function* () {
     const { config } = yield* ConfigService;
     return config;
-  }).pipe(Effect.provide(ConfigServiceLive), Effect.either);
+  }).pipe(Effect.provide(HttpConfigServiceLive), Effect.either);
 
   const configResult = await Effect.runPromise(configProgram);
 
@@ -259,14 +302,20 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  const config = configResult.right;
+  // HTTP server defaults to read-only for safety; set SLAB_READONLY=false to enable writes
+  const readOnly = config.readOnly;
+
   const PORT = parseInt(process.env.PORT || "8080", 10);
 
   const app = express();
   app.use(express.json());
 
+  const mode = readOnly ? "readonly" : "read-write";
+
   // Health check endpoint for Cloud Run / load balancers
   app.get("/health", (_req: Request, res: Response) => {
-    res.status(200).json({ status: "healthy", service: "slabby-readonly" });
+    res.status(200).json({ status: "healthy", service: `slabby-http-${mode}` });
   });
 
   // MCP POST endpoint - handles initialization and tool calls
@@ -301,7 +350,7 @@ async function main(): Promise<void> {
         };
 
         // Connect to MCP server
-        const server = createServer();
+        const server = createServer(readOnly);
         await server.connect(transport);
         await transport.handleRequest(req, res, req.body);
         return;
@@ -368,16 +417,25 @@ async function main(): Promise<void> {
 
   // Start the server
   app.listen(PORT, () => {
-    console.log(`🧱 Slabby READ-ONLY HTTP Server listening on port ${PORT}`);
+    const modeLabel = readOnly ? "READ-ONLY" : "READ-WRITE";
+    console.log(`🧱 Slabby HTTP Server listening on port ${PORT} (${modeLabel} mode)`);
     console.log(`   Health check: http://localhost:${PORT}/health`);
     console.log(`   MCP endpoint: http://localhost:${PORT}/mcp`);
     console.log("");
-    console.log("Available tools (READ-ONLY):");
-    console.log("  📖 slab__get_post  - Fetch post content by ID or URL");
-    console.log("  🔍 slab__search    - Search posts across workspace");
-    console.log("  📋 slab__list_posts - List posts by topic");
+    console.log("Available tools:");
+    console.log("  📖 slab__get_post   - Fetch post content by ID or URL");
+    console.log("  🔍 slab__search     - Search posts across workspace");
+    console.log("  📋 slab__list_posts  - List posts by topic");
+    if (!readOnly) {
+      console.log("  ✏️  slab__update_post - Update post content");
+    }
     console.log("");
-    console.log("⛔ Update/delete operations are DISABLED for security");
+    if (readOnly) {
+      console.log("⛔ Write operations are DISABLED (SLAB_READONLY=true, default for HTTP server)");
+      console.log("   Set SLAB_READONLY=false to enable write operations");
+    } else {
+      console.log("⚠️  Write operations are ENABLED (SLAB_READONLY=false)");
+    }
   });
 
   // Handle graceful shutdown
