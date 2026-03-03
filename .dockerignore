@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Development files
+.env
+.env.*
+*.log
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+
+# Test files
+test/
+*.test.ts
+coverage/
+
+# Documentation (not needed in container)
+*.md
+!README.md
+
+# Lock files (we use package-lock.json)
+bun.lock

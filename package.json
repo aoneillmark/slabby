@@ -1,16 +1,20 @@
 {
   "name": "@russwyte/slabby",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "MCP server for Slab knowledge base integration with AI coding agents",
   "main": "./dist/index.js",
   "type": "module",
   "bin": {
-    "slabby": "dist/index.js"
+    "slabby": "dist/index.js",
+    "slabby-http": "dist/src/server-http.js"
   },
   "scripts": {
     "start": "bun run index.ts",
+    "start:http": "npx tsx src/server-http.ts",
     "dev": "bun run --watch index.ts",
+    "dev:http": "npx tsx --watch src/server-http.ts",
     "build": "bun build index.ts --target=node --outdir=dist --format=esm && bun build src/index.ts --target=node --outdir=dist/src --format=esm && sed -i '1s|#!/usr/bin/env bun|#!/usr/bin/env node|' dist/index.js",
+    "build:http": "npx tsc && cp package.json dist/",
     "test": "bun test",
     "test:watch": "bun test --watch",
     "prepublishOnly": "bun test && bun run build"
@@ -45,13 +49,17 @@
     "bun": ">=1.0.0"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.19.7",
+    "tsx": "^4.21.0"
   },
   "peerDependencies": {
     "typescript": "^5"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.20.0",
-    "effect": "^3.18.4"
+    "effect": "^3.18.4",
+    "express": "^5.2.1"
   }
 }
